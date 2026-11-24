@@ -10,11 +10,24 @@ const TONE = {
   Minor: 'muted', Major: 'warn', Critical: 'bad',
   'Containment done': 'warn', 'Root cause found': 'warn', 'Action taken': 'info',
   Call: 'muted', Visit: 'info', Meeting: 'info', Email: 'muted', WhatsApp: 'muted', Note: 'muted',
+  // Weekly planning
+  Running: 'ok', Breakdown: 'bad', Idle: 'muted', Scrapped: 'muted',
+  Planned: 'info', Postponed: 'warn', Missed: 'bad', 'In progress': 'warn', Short: 'bad',
+  'Indent raised': 'info', 'PO placed': 'warn', 'Part received': 'warn', Received: 'ok',
+  Approved: 'warn', Paid: 'ok', Deferred: 'muted',
+  'Must pay': 'bad', Normal: 'muted', 'Can defer': 'muted',
+  Cash: 'muted', UPI: 'info', Expense: 'muted', 'Cash top-up': 'ok',
+  // Jobs
+  'To do': 'info', Waiting: 'muted', Urgent: 'bad', High: 'warn', Low: 'muted', Head: 'info',
+  // Checklists (an approved checklist is finished, unlike an approved payment, so it gets its own tone below)
+  Submitted: 'warn', Returned: 'bad',
 };
 
-const dash = html`<span class="dim">—</span>`;
+const dash = html`<span class="dim nil">—</span>`; // .nil: phones hide a table cell holding only this
 const badge = (v, tone) => (v ? html`<span class="badge tone-${tone || TONE[v] || 'muted'}">${v}</span>` : dash);
 const date = (v) => (v ? html`<span class="nowrap">${F.fmtDate(v)}</span>` : dash);
+// A checklist run's status: Approved means signed off and finished.
+const runStatus = (v) => badge(v, v === 'Approved' ? 'ok' : undefined);
 
 // A due date that turns amber when close and red when past, while `active`.
 function due(v, active) {
@@ -52,7 +65,18 @@ const edit = (key, r, label, sub, ctx) =>
   html`<a class="rowlink" href="${withReturn(`/${key}/${r.id}/edit`, ctx)}">${label || '(untitled)'}</a>${sub ? html`<span class="sub">${sub}</span>` : ''}`;
 
 function doneButton(r, ctx) {
-  return html`<form method="post" action="/followups/${r.id}/done" class="inline">${csrf(ctx)}<input type="hidden" name="return" value="${ctx.url.pathname + ctx.url.search}"><button type="submit" class="btn btn-sm">Done</button></form>`;
+  return html`<form method="post" action="/followups/${r.id}/done" class="inline">${csrf(ctx)}<input type="hidden" name="return" value="${ctx.url.pathname + ctx.url.search}"><button type="submit" class="btn btn-sm" aria-label="Done: ${r.title}">Done</button></form>`;
 }
 
-module.exports = { TONE, EMAIL_RE, dash, badge, date, due, money, money2, int, text, tel, email, clip, withReturn, csrf, client, edit, doneButton };
+// A one-click POST button that comes back to the current page, with optional extra form fields.
+// `what` names the record, so a screen reader hears "Done: PM of PP-01 Power press", not just "Done".
+function actionButton(action, label, ctx, fields = {}, what = '') {
+  return html`<form method="post" action="${action}" class="inline">${csrf(ctx)}<input type="hidden" name="return" value="${ctx.url.pathname + ctx.url.search}">${Object.entries(fields).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}<button type="submit" class="btn btn-sm"${what ? html` aria-label="${label}: ${what}"` : ''}>${label}</button></form>`;
+}
+
+const week = (ws) => (ws ? html`<span class="nowrap">${F.weekLabel(ws)}</span>` : dash);
+
+// Totals line above a plan list: [{ label, value, tone }].
+const sumbar = (items) => html`<div class="sumbar">${items.map((i) => html`<span class="sumbar-i"><b class="num${i.tone ? ` tone-text-${i.tone}` : ''}">${i.value}</b> ${i.label}</span>`)}</div>`;
+
+module.exports = { TONE, EMAIL_RE, dash, badge, runStatus, date, due, money, money2, int, text, tel, email, clip, withReturn, csrf, client, edit, doneButton, actionButton, week, sumbar };

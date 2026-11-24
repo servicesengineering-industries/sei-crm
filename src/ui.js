@@ -3,47 +3,124 @@ const { html, raw, attrIf } = require('./html');
 const F = require('./format');
 const C = require('./cells');
 const { ROLES, isAdmin } = require('./auth');
+const CL = require('./checklists');
 
-const ASSET_V = '8';
+const ASSET_V = '27';
 // SEI's ring mark, from the brand.
 const MARK = raw('<svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20zm0 5.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9z"/></svg>');
 const FONT_PRELOAD = raw('<link rel="preload" href="/static/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin><link rel="preload" href="/static/fonts/instrument-serif-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>');
+
+// Menu icons: drawn on a 24px grid, one stroke weight (set in app.css), no fills.
+const ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  clients: '<path d="M4 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/><path d="M16 9h2a2 2 0 0 1 2 2v10"/><path d="M2 21h20"/><path d="M8 7h4M8 11h4M8 15h4"/>',
+  contacts: '<circle cx="9" cy="7.5" r="3.5"/><path d="M3 20v-1a5 5 0 0 1 5-5h2a5 5 0 0 1 5 5v1"/><path d="M16 4.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a5 5 0 0 1 3 4.7v1"/>',
+  followups: '<rect x="3" y="4.5" width="18" height="16.5" rx="2"/><path d="M8 2.5v4M16 2.5v4M3 10h18"/><path d="m9 15.5 2 2 4-4"/>',
+  activities: '<path d="M22 12h-4l-3 8L9 4l-3 8H2"/>',
+  jobs: '<rect x="4.5" y="4" width="15" height="17.5" rx="2"/><path d="M9 2.5h6v3H9z"/><path d="m8.5 12 1.5 1.5 3-3M8.5 17.5h7"/>',
+  'my-checklists': '<path d="m3.5 6 1.5 1.5L8 4.5M3.5 12l1.5 1.5L8 10.5M3.5 18l1.5 1.5L8 16.5"/><path d="M11 6h9.5M11 12h9.5M11 18h9.5"/>',
+  approvals: '<circle cx="12" cy="9.5" r="6.5"/><path d="m9.2 9.6 2 2 3.7-3.8"/><path d="M8.3 14.8 7 21.5l5-2.6 5 2.6-1.3-6.7"/>',
+  compliance_items: '<rect x="3" y="4.5" width="18" height="16.5" rx="2"/><path d="M8 2.5v4M16 2.5v4M3 10h18"/><circle cx="15.5" cy="15.5" r="3.2"/><path d="M15.5 14v1.6l1 .9"/>',
+  scorecards: '<path d="M3 21h18"/><rect x="5" y="11" width="3.5" height="7" rx="1"/><rect x="10.25" y="6" width="3.5" height="12" rx="1"/><rect x="15.5" y="13.5" width="3.5" height="4.5" rx="1"/>',
+  rfqs: '<path d="M14 2.5H6.5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8z"/><path d="M14 2.5V8h5.5"/><path d="M8.5 13h7M8.5 17h5"/>',
+  orders: '<path d="M14 17.5V6a1.5 1.5 0 0 0-1.5-1.5h-9A1.5 1.5 0 0 0 2 6v10a1.5 1.5 0 0 0 1.5 1.5H5"/><path d="M14 8.5h3.6a1.5 1.5 0 0 1 1.2.6l2.9 3.8a1.5 1.5 0 0 1 .3.9v2.2a1.5 1.5 0 0 1-1.5 1.5H19"/><path d="M9 17.5h6"/><circle cx="7" cy="17.5" r="2"/><circle cx="17" cy="17.5" r="2"/>',
+  invoices: '<path d="M5 2.5h14v19l-2.33-1.5-2.34 1.5L12 20l-2.33 1.5L7.33 20 5 21.5z"/><path d="M8.5 7.5h7M8.5 11.5h7M8.5 15.5h4"/>',
+  complaints: '<path d="M12 21.5s7.5-3.5 7.5-9.5V5.5L12 2.5l-7.5 3V12c0 6 7.5 9.5 7.5 9.5z"/><path d="M12 8v4.5M12 16h.01"/>',
+  planning: '<rect x="3" y="4.5" width="18" height="16.5" rx="2"/><path d="M8 2.5v4M16 2.5v4M3 10h18"/><path d="M7 14h5M10 17.5h7"/>',
+  sales_plans: '<path d="m2 17 6.5-6.5 5 5L22 7"/><path d="M16 7h6v6"/>',
+  production_plans: '<path d="M2.5 21V9.5l6 3.5V9.5l6 3.5V4.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1V21z"/><path d="M2 21h20"/><path d="M7 17h2M12 17h2M17 17h1"/>',
+  pm_tasks: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  assets: '<circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+  purchase_plans: '<circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h2.5l2.6 12.2a1.5 1.5 0 0 0 1.5 1.3h9.3a1.5 1.5 0 0 0 1.5-1.2L21 7H5.3"/>',
+  suppliers: '<path d="M21 7.8v8.4a1.5 1.5 0 0 1-.8 1.3l-7.5 4.2a1.5 1.5 0 0 1-1.4 0l-7.5-4.2a1.5 1.5 0 0 1-.8-1.3V7.8a1.5 1.5 0 0 1 .8-1.3l7.5-4.2a1.5 1.5 0 0 1 1.4 0l7.5 4.2a1.5 1.5 0 0 1 .8 1.3z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/>',
+  payment_plans: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
+  petty_cash: '<path d="M18 7.5V5a1.5 1.5 0 0 0-1.5-1.5H5a2.5 2.5 0 0 0 0 5h14.5A1.5 1.5 0 0 1 21 10v3"/><path d="M21 17v2.5a1.5 1.5 0 0 1-1.5 1.5H5a2.5 2.5 0 0 1-2.5-2.5V6"/><path d="M21 13h-3.5a2 2 0 0 0 0 4H21z"/>',
+  users: '<circle cx="10" cy="8" r="4"/><path d="M3 21v-1a6 6 0 0 1 6-6h2.5"/><path d="m15.5 18.5 2 2 4-4"/>',
+};
+const icon = (key) => raw(`<svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[key] || ''}</svg>`);
 
 const NAV = [
   { href: '/', label: 'Dashboard', key: 'dashboard' },
   { href: '/clients', label: 'Clients', key: 'clients' },
   { href: '/contacts', label: 'Contacts', key: 'contacts' },
+  { href: '/jobs', label: 'Jobs', key: 'jobs', count: 'jobs', countTitle: 'Open jobs given to you' },
   { href: '/followups', label: 'Follow-ups', key: 'followups', count: 'followups', countTitle: 'Due today or overdue, assigned to you' },
   { href: '/activities', label: 'Activity log', key: 'activities' },
+  { sep: 'Company checklist' },
+  { href: '/my-checklists', label: 'My checklists', key: 'my-checklists', count: 'runs', countTitle: 'Checklists to fill in today, or missed' },
+  { href: '/approvals', label: 'Sign-offs', key: 'approvals', count: 'approvals', countTitle: 'Waiting for your sign-off' },
+  { href: '/compliance_items', label: 'Compliance', key: 'compliance_items', count: 'compliance', countTitle: 'Compliance dates due soon or overdue' },
+  { href: '/scorecards', label: 'Scorecards', key: 'scorecards' },
   { sep: 'Business' },
   { href: '/rfqs', label: 'RFQs & quotes', key: 'rfqs' },
   { href: '/orders', label: 'Orders & deliveries', key: 'orders', count: 'late', countTitle: 'Late POs' },
   { href: '/invoices', label: 'Invoices & dues', key: 'invoices', count: 'overdueInv', countTitle: 'Overdue invoices' },
   { href: '/complaints', label: 'Quality complaints', key: 'complaints', count: 'complaints', countTitle: 'Open complaints' },
+  { sep: 'Weekly planning' },
+  { href: '/planning', label: 'Week planner', key: 'planning' },
+  { href: '/sales_plans', label: 'Sales plan', key: 'sales_plans' },
+  { href: '/production_plans', label: 'Production plan', key: 'production_plans' },
+  { href: '/pm_tasks', label: 'Preventive maintenance', key: 'pm_tasks', count: 'pmOverdue', countTitle: 'PM tasks past their planned day' },
+  { href: '/assets', label: 'Machines & tools', key: 'assets', count: 'breakdown', countTitle: 'Machines and tools under breakdown' },
+  { href: '/purchase_plans', label: 'Purchase plan', key: 'purchase_plans', count: 'latePurchase', countTitle: 'Purchases not received by the day needed' },
+  { href: '/suppliers', label: 'Suppliers', key: 'suppliers' },
+  { href: '/payment_plans', label: 'Payment plan', key: 'payment_plans', count: 'payOverdue', countTitle: 'Payments not made on the planned day' },
+  { href: '/petty_cash', label: 'Petty cash (Cash / UPI)', key: 'petty_cash' },
 ];
 
+// Worked out once per request: the menu and the dashboard both use them.
 function navCounts(ctx) {
+  if (!ctx.navCountsCache) ctx.navCountsCache = countNav(ctx);
+  return ctx.navCountsCache;
+}
+
+function countNav(ctx) {
   const t = F.today();
   const db = ctx.db;
+  CL.ensureRuns(db); // the first page of the day makes the day's checklists
+  const u = ctx.user;
+  const me = { me: u.id, dept: u.department || '', t, from: F.addDays(t, -14) };
+  const admin = u.role === 'admin';
+  const runsToSign = admin ? db.get("SELECT COUNT(*) AS n FROM checklist_runs WHERE status = 'Submitted'").n
+    : u.is_head ? db.get("SELECT COUNT(*) AS n FROM checklist_runs WHERE status = 'Submitted' AND department = :dept AND COALESCE(submitted_by, 0) <> :me", me).n : 0;
+  const jobsToSign = db.get(`SELECT COUNT(*) AS n FROM jobs WHERE status = 'Done' AND approved_at IS NULL
+                             AND (:admin = 1 OR ((assigned_by = :me OR (:head = 1 AND department = :dept)) AND assigned_to <> :me))`, { ...me, admin: admin ? 1 : 0, head: u.is_head ? 1 : 0 }).n;
   return {
+    runs: db.get(`SELECT COUNT(*) AS n FROM checklist_runs WHERE status IN ('Open', 'Returned') AND due_on BETWEEN :from AND :t
+                  AND (assignee_id = :me OR (assignee_id IS NULL AND department = :dept))`, me).n,
+    approvals: runsToSign + jobsToSign,
+    compliance: db.get("SELECT COUNT(*) AS n FROM compliance_items WHERE active = 1 AND date(due_on, '-' || remind_days || ' days') <= :t", { t }).n,
     followups: db.get("SELECT COUNT(*) AS n FROM followups WHERE status = 'Open' AND due_on <= :t AND assigned_to = :u", { t, u: ctx.user.id }).n,
+    jobs: db.get("SELECT COUNT(*) AS n FROM jobs WHERE assigned_to = :u AND status IN ('To do', 'In progress', 'Waiting')", { u: ctx.user.id }).n,
     late: db.get("SELECT COUNT(*) AS n FROM v_orders WHERE status = 'Open' AND pending > 0 AND due_on < :t", { t }).n,
     overdueInv: db.get('SELECT COUNT(*) AS n FROM v_invoices WHERE balance > 0.5 AND due_on < :t', { t }).n,
     complaints: db.get("SELECT COUNT(*) AS n FROM complaints WHERE status <> 'Closed'").n,
+    pmOverdue: db.get("SELECT COUNT(*) AS n FROM pm_tasks WHERE status IN ('Planned', 'Postponed') AND planned_on < :t", { t }).n,
+    breakdown: db.get("SELECT COUNT(*) AS n FROM assets WHERE status = 'Breakdown'").n,
+    latePurchase: db.get("SELECT COUNT(*) AS n FROM purchase_plans WHERE status IN ('Planned', 'Indent raised', 'PO placed', 'Part received') AND required_by < :t", { t }).n,
+    payOverdue: db.get("SELECT COUNT(*) AS n FROM payment_plans WHERE status IN ('Planned', 'Approved') AND plan_date < :t", { t }).n,
   };
 }
 
 function navItem(n, active, count) {
   const on = n.key === active;
-  return html`<a class="nav-item${on ? ' is-active' : ''}" href="${n.href}"${attrIf(on, 'aria-current="page"')}><span>${n.label}</span>${count ? html`<span class="nav-count" title="${n.countTitle || ''}">${count}</span>` : ''}</a>`;
+  const shown = count > 99 ? '99+' : count;
+  // The closed rail shows the count as a badge on the icon; the open menu shows it at the row's end.
+  // The count's meaning ("Late POs") is in a hidden span too, so a screen reader says what it counts.
+  const badge = count ? html`<span class="nav-dot" aria-hidden="true">${shown}</span><span class="nav-count" title="${n.countTitle || ''}">${shown}${n.countTitle ? html`<span class="vh">${n.countTitle}</span>` : ''}</span>` : '';
+  return html`<a class="nav-item${on ? ' is-active' : ''}" href="${n.href}"${attrIf(on, 'aria-current="page"')}>${icon(n.key)}<span class="nav-label">${n.label}</span>${badge}</a>`;
 }
+const navSep = (label) => html`<div class="nav-sep"><span>${label}</span></div>`;
+// Wide screens show the menu as a strip across the top; these arrows move it sideways (public/app.js).
+// They only help the mouse: the keyboard reaches every link, and the strip follows the focus.
+const STRIP_ARROW = (dir) => html`<button class="strip-arrow" type="button" data-strip="${dir}" tabindex="-1" aria-hidden="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${dir < 0 ? 'M15 5l-7 7 7 7' : 'M9 5l7 7-7 7'}"/></svg></button>`;
 
 function layout(ctx, { title, body, active }) {
   const u = ctx.user;
   const counts = navCounts(ctx);
   const flash = ctx.takeFlash();
-  const items = NAV.map((n) => (n.sep ? html`<div class="nav-sep">${n.sep}</div>` : navItem(n, active, counts[n.count])));
-  if (isAdmin(u)) items.push(html`<div class="nav-sep">Admin</div>`, navItem({ href: '/users', label: 'Users', key: 'users' }, active));
+  const items = NAV.map((n) => (n.sep ? navSep(n.sep) : navItem(n, active, counts[n.count])));
+  if (isAdmin(u)) items.push(navSep('Admin'), navItem({ href: '/users', label: 'Users', key: 'users' }, active));
   const q = ctx.path === '/search' ? ctx.query.q || '' : '';
   return html`<!doctype html>
 <html lang="en">
@@ -61,12 +138,13 @@ ${FONT_PRELOAD}
 <div class="shell">
   <aside class="side" id="side">
     <a class="brand" href="/" aria-label="SEI Client CRM, dashboard">${MARK}<span class="brand-word">SEI</span><span class="brand-sub">Client CRM</span></a>
-    <nav class="nav" aria-label="Main">${items}</nav>
+    ${STRIP_ARROW(-1)}<nav class="nav" aria-label="Main">${items}</nav>${STRIP_ARROW(1)}
+    <a class="side-pw" href="/account/password">Change password</a>
     <div class="side-foot">${ctx.cfg.companyName}</div>
   </aside>
   <div class="main">
     <header class="top">
-      <button class="nav-toggle" type="button" data-nav-toggle aria-controls="side" aria-label="Open menu">Menu</button>
+      <button class="nav-toggle" type="button" data-nav-toggle aria-controls="side" aria-expanded="false">Menu</button>
       <form class="search" action="/search" method="get" role="search">
         <input type="search" name="q" value="${q}" placeholder="Search clients, people, phone, part, PO or invoice no" aria-label="Search">
       </form>
@@ -92,9 +170,9 @@ const button = (href, label, variant = '') => html`<a class="btn${variant ? ` bt
 
 function table(cols, rows, { ctx, empty = 'Nothing here yet.', rowClass } = {}) {
   if (!rows.length) return html`<div class="empty">${empty}</div>`;
-  return html`<div class="table-wrap"><table class="grid">
-<thead><tr>${cols.map((c) => html`<th scope="col" class="${c.cls || ''}">${c.label}</th>`)}</tr></thead>
-<tbody>${rows.map((r) => html`<tr class="${rowClass ? rowClass(r) : ''}">${cols.map((c) => html`<td class="${c.cls || ''}">${c.render ? c.render(r, ctx) : C.text(r[c.key])}</td>`)}</tr>`)}</tbody>
+  return html`<div class="table-wrap"><table class="grid stack">
+<thead><tr>${cols.map((c) => html`<th scope="col" class="${c.cls || ''}">${c.label || html`<span class="vh">Actions</span>`}</th>`)}</tr></thead>
+<tbody>${rows.map((r) => html`<tr class="${rowClass ? rowClass(r) : ''}">${cols.map((c) => html`<td class="${c.cls || ''}" data-label="${c.label}">${c.render ? c.render(r, ctx) : C.text(r[c.key])}</td>`)}</tr>`)}</tbody>
 </table></div>`;
 }
 
@@ -113,25 +191,43 @@ const FK_SQL = {
   contact: `SELECT ct.id, ct.name || COALESCE(' – ' || ct.designation, '') AS label, ct.client_id, c.name AS grp
             FROM contacts ct JOIN clients c ON c.id = ct.client_id WHERE ct.active = 1 OR ct.id = :cur
             ORDER BY c.name, ct.is_primary DESC, ct.name`,
-  rfq: `SELECT r.id, r.part_name || COALESCE(' (' || r.part_no || ')', '') || ' – ' || r.status AS label, r.client_id, c.name AS grp
-        FROM rfqs r JOIN clients c ON c.id = r.client_id ORDER BY c.name, r.received_on DESC`,
+  rfq: `SELECT r.id, r.part_name || COALESCE(' (' || r.part_no || ')', '') || ' – ' || r.status AS label, r.client_id, c.name AS grp,
+               r.part_name AS fill_part, r.part_no AS fill_part_no, r.unit_price AS fill_price
+        FROM rfqs r JOIN clients c ON c.id = r.client_id
+        WHERE r.received_on >= date('now', '-2 years') OR r.status IN ('New', 'Costing', 'Quoted', 'Negotiation') OR r.id = :cur
+        ORDER BY c.name, r.received_on DESC`,
   order: `SELECT o.id, o.po_no || ' – ' || o.part_name || ' (pending ' || o.pending || ')' AS label, o.client_id, c.name AS grp
           FROM v_orders o JOIN clients c ON c.id = o.client_id WHERE o.status = 'Open' OR o.id = :cur
           ORDER BY c.name, o.due_on`,
   orderAll: `SELECT o.id, o.po_no || ' – ' || o.part_name || CASE WHEN o.status = 'Open' THEN '' ELSE ' (' || o.status || ')' END AS label, o.client_id, c.name AS grp
              FROM v_orders o JOIN clients c ON c.id = o.client_id
+             WHERE o.status = 'Open' OR o.po_date >= date('now', '-2 years') OR o.id = :cur
              ORDER BY c.name, CASE WHEN o.status = 'Open' THEN 0 ELSE 1 END, o.po_date DESC`,
   invoice: `SELECT i.id, i.invoice_no || ' – balance ₹' || CAST(ROUND(i.balance) AS INTEGER) AS label, i.client_id, c.name AS grp
             FROM v_invoices i JOIN clients c ON c.id = i.client_id WHERE i.balance > 0.5 OR i.id = :cur
             ORDER BY c.name, i.invoice_date`,
+  supplier: `SELECT id, name || CASE WHEN active = 0 THEN ' (not in use)' ELSE '' END AS label, NULL AS client_id, NULL AS grp
+             FROM suppliers WHERE active = 1 OR id = :cur ORDER BY name`,
+  asset: `SELECT id, code || ' – ' || name || CASE WHEN status <> 'Running' THEN ' (' || status || ')' ELSE '' END AS label, NULL AS client_id, asset_type AS grp
+          FROM assets WHERE status <> 'Scrapped' OR id = :cur
+          ORDER BY CASE asset_type WHEN 'Machine' THEN 0 WHEN 'Utility' THEN 1 WHEN 'Tool / die' THEN 2 WHEN 'Fixture' THEN 3 ELSE 4 END, code`,
+  machine: `SELECT id, code || ' – ' || name || CASE WHEN status <> 'Running' THEN ' (' || status || ')' ELSE '' END AS label, NULL AS client_id, NULL AS grp
+            FROM assets WHERE (asset_type IN ('Machine', 'Utility') AND status <> 'Scrapped') OR id = :cur ORDER BY code`,
+  // People grouped by department, heads marked.
+  assignee: `SELECT id, name || CASE WHEN is_head = 1 THEN ' (head)' ELSE '' END || CASE WHEN active = 0 THEN ' (disabled)' ELSE '' END AS label,
+                    NULL AS client_id, COALESCE(department, 'No department set') AS grp
+             FROM users WHERE active = 1 OR id = :cur
+             ORDER BY CASE WHEN department IS NULL THEN 1 ELSE 0 END, department, is_head DESC, name`,
 };
 const SCOPED = new Set(['contact', 'rfq', 'order', 'invoice']);
 
-function fkSelect(ctx, f, id, value, disabled) {
+function fkSelect(ctx, f, id, value, disabled, aria = '') {
   // Dispatches only go against open POs; an invoice can point at any PO, including a closed one.
   const sql = f.type === 'order' && !f.openOnly ? FK_SQL.orderAll : FK_SQL[f.type];
   const rows = ctx.db.all(sql, { cur: value == null || value === '' ? -1 : Number(value) });
-  const opt = (r) => html`<option value="${r.id}"${r.client_id != null ? html` data-client="${r.client_id}"` : ''}${attrIf(String(r.id) === String(value ?? ''), 'selected')}>${r.label}</option>`;
+  // An RFQ also carries its part and price, which public/app.js copies into an empty PO form.
+  const fill = (r) => (r.fill_part !== undefined ? html` data-part="${r.fill_part}" data-part-no="${r.fill_part_no ?? ''}" data-price="${r.fill_price ?? ''}"` : '');
+  const opt = (r) => html`<option value="${r.id}"${r.client_id != null ? html` data-client="${r.client_id}"` : ''}${fill(r)}${attrIf(String(r.id) === String(value ?? ''), 'selected')}>${r.label}</option>`;
   let body;
   if (rows.some((r) => r.grp)) {
     const groups = new Map();
@@ -140,18 +236,20 @@ function fkSelect(ctx, f, id, value, disabled) {
   } else {
     body = rows.map(opt);
   }
-  return html`<select id="${id}" name="${f.name}"${attrIf(f.required, 'required')}${attrIf(disabled, 'disabled')}${attrIf(f.type === 'client', 'data-client-select')}${attrIf(SCOPED.has(f.type), 'data-scoped')}><option value="">${f.required ? 'Choose…' : '—'}</option>${body}</select>`;
+  return html`<select id="${id}" name="${f.name}"${attrIf(f.required, 'required')}${attrIf(disabled, 'disabled')}${aria}${attrIf(f.type === 'client', 'data-client-select')}${attrIf(SCOPED.has(f.type), 'data-scoped')}><option value="">${f.required ? 'Choose…' : '—'}</option>${body}</select>`;
 }
 
-function control(ctx, f, id, value, disabled) {
+function control(ctx, f, id, value, disabled, aria = '') {
   const v = value ?? '';
-  const common = html` id="${id}" name="${f.name}"${attrIf(f.required, 'required')}${attrIf(disabled, 'disabled')}`;
+  const common = html` id="${id}" name="${f.name}"${attrIf(f.required, 'required')}${attrIf(disabled, 'disabled')}${aria}`;
   switch (f.type) {
     case 'textarea': return html`<textarea${common} rows="${f.rows || 3}">${v}</textarea>`;
     case 'select': return html`<select${common}><option value="">${f.required ? 'Choose…' : '—'}</option>${f.options.map((o) => html`<option${attrIf(o === v, 'selected')}>${o}</option>`)}</select>`;
-    case 'client': case 'contact': case 'user': case 'rfq': case 'order': case 'invoice': return fkSelect(ctx, f, id, value, disabled);
+    case 'client': case 'contact': case 'user': case 'rfq': case 'order': case 'invoice':
+    case 'supplier': case 'asset': case 'machine': case 'assignee': return fkSelect(ctx, f, id, value, disabled, aria);
     case 'date': return html`<input type="date"${common} value="${v}">`;
     case 'int': return html`<input type="number" inputmode="numeric" step="1" min="${f.min ?? 0}"${common} value="${v}">`;
+    case 'decimal': return html`<input type="text" inputmode="decimal" class="num"${common} value="${v}" autocomplete="off">`;
     case 'money': case 'money2': return html`<input type="text" inputmode="decimal" class="num"${common} value="${v}" autocomplete="off">`;
     case 'email': return html`<input type="email"${common} value="${v}" autocomplete="off">`;
     case 'tel': return html`<input type="tel"${common} value="${v}" autocomplete="off">`;
@@ -160,8 +258,12 @@ function control(ctx, f, id, value, disabled) {
   }
 }
 
-function fieldRow(ctx, f, value, error, disabled) {
+function fieldRow(ctx, f, value, error, readonly) {
   const id = `f_${f.name}`;
+  // `auto` fields are filled in by the app (for example who approved), so they are shown, not edited.
+  const disabled = readonly || !!f.auto;
+  // Screen readers read the error (or the help) with the field; only the form's summary is an alert.
+  const aria = error ? html` aria-invalid="true" aria-describedby="${id}-err"` : f.help ? html` aria-describedby="${id}-help"` : '';
   const wide = f.type === 'textarea' || f.wide;
   if (f.type === 'checkbox') {
     const on = value === 1 || value === '1' || value === true;
@@ -169,8 +271,8 @@ function fieldRow(ctx, f, value, error, disabled) {
   }
   return html`<div class="field${wide ? ' wide' : ''}${error ? ' has-error' : ''}">
 <label for="${id}">${f.label}${f.required ? html`<span class="req" aria-hidden="true"> *</span>` : ''}</label>
-${control(ctx, f, id, value, disabled)}
-${error ? html`<div class="err" role="alert">${error}</div>` : f.help ? html`<div class="help">${f.help}</div>` : ''}
+${control(ctx, f, id, value, disabled, aria)}
+${error ? html`<div class="err" id="${id}-err">${error}</div>` : f.help ? html`<div class="help" id="${id}-help">${f.help}</div>` : ''}
 </div>`;
 }
 
@@ -186,7 +288,7 @@ function form(ctx, mod, { action, values, errors = {}, readonly, editing, return
   return html`<form method="post" action="${action}" class="form">
 ${C.csrf(ctx)}
 ${returnTo ? html`<input type="hidden" name="return" value="${returnTo}">` : ''}
-${errorCount ? html`<div class="alert alert-error" role="alert">Please fix the ${errorCount === 1 ? 'highlighted field' : `${errorCount} highlighted fields`}.</div>` : ''}
+${errorCount ? html`<div class="alert alert-error" role="alert" tabindex="-1" data-focus>Please fix the ${errorCount === 1 ? 'highlighted field' : `${errorCount} highlighted fields`}.</div>` : ''}
 ${groups.map((g) => html`<fieldset class="fs">${g.title ? html`<legend>${g.title}</legend>` : ''}<div class="fgrid">${g.fields.map((f) => fieldRow(ctx, f, values[f.name], errors[f.name], readonly))}</div></fieldset>`)}
 ${readonly ? '' : html`<div class="form-actions"><button class="btn btn-primary" type="submit">${submit}</button><a class="btn btn-quiet" href="${cancel}">Cancel</a></div>`}
 </form>`;
@@ -198,7 +300,8 @@ function filterBar(ctx, mod, filters) {
   const viewLinks = (mod.views || []).map((v) => {
     const p = new URLSearchParams(ctx.url.search);
     p.set('view', v.key);
-    return html`<a class="chip${filters.view === v.key ? ' is-active' : ''}" href="/${mod.key}?${p.toString()}">${v.label}</a>`;
+    p.delete('page');
+    return html`<a class="chip${filters.view === v.key ? ' is-active' : ''}"${attrIf(filters.view === v.key, 'aria-current="page"')} href="/${mod.key}?${p.toString()}">${v.label}</a>`;
   });
   const clients = ctx.db.all('SELECT id, name FROM clients ORDER BY name');
   const users = ctx.db.all('SELECT id, name FROM users WHERE active = 1 ORDER BY name');
@@ -209,18 +312,35 @@ function filterBar(ctx, mod, filters) {
     }
     return html`<select name="${f.name}" aria-label="${f.label}"><option value="">${f.label}: all</option>${f.options.map((o) => html`<option${attrIf(o === v, 'selected')}>${o}</option>`)}</select>`;
   });
-  const active = filters.q || filters.client || (mod.filters || []).some((f) => filters[f.name]);
+  // Weekly plans: pick any week that has entries, plus the weeks around today.
+  let weekSelect = '';
+  if (mod.weekly) {
+    const wk = F.weekOf(F.today());
+    const weeks = new Set([F.addDays(wk, -7), wk, F.addDays(wk, 7), F.addDays(wk, 14)]);
+    for (const r of ctx.db.all(`SELECT DISTINCT week_start FROM ${mod.table} ORDER BY week_start DESC LIMIT 60`)) weeks.add(r.week_start);
+    if (filters.week) weeks.add(filters.week);
+    const list = [...weeks].sort().reverse();
+    weekSelect = html`<select name="week" aria-label="Week"><option value="">Any week</option>${list.map((w) => html`<option value="${w}"${attrIf(w === filters.week, 'selected')}>Week of ${F.weekLabel(w)}${w === wk ? ' (this week)' : ''}</option>`)}</select>`;
+  }
+  const active = filters.q || filters.client || filters.week || (mod.filters || []).some((f) => filters[f.name]);
   return html`<div class="filterbar">
 ${viewLinks.length ? html`<nav class="chips" aria-label="Views">${viewLinks}</nav>` : ''}
-<form class="filters" method="get" action="/${mod.key}" data-autosubmit>
+${filterFold(active, html`<form class="filters" method="get" action="/${mod.key}" data-autosubmit>
 <input type="hidden" name="view" value="${filters.view}">
 <input type="search" name="q" value="${filters.q}" placeholder="Search ${mod.plural.toLowerCase()}" aria-label="Search ${mod.plural}">
-<select name="client" aria-label="Client"><option value="">All clients</option>${clients.map((c) => html`<option value="${c.id}"${attrIf(String(c.id) === filters.client, 'selected')}>${c.name}</option>`)}</select>
+${weekSelect}
+${mod.noClient ? '' : html`<select name="client" aria-label="Client"><option value="">All clients</option>${clients.map((c) => html`<option value="${c.id}"${attrIf(String(c.id) === filters.client, 'selected')}>${c.name}</option>`)}</select>`}
 ${selects}
 <button class="btn btn-sm" type="submit">Apply</button>
 ${active ? html`<a class="clear" href="/${mod.key}?view=${filters.view}">Clear filters</a>` : ''}
-</form>
+</form>`)}
 </div>`;
 }
 
-module.exports = { ASSET_V, MARK, FONT_PRELOAD, layout, pageHeader, button, table, tile, flags, form, fieldRow, filterBar };
+// On a phone the filters fold behind one "Filters" button (public/app.js closes the fold there
+// unless a filter is in use), so the first rows of the list show on the first screen.
+function filterFold(active, form) {
+  return html`<details class="ffold"${active ? html` data-active="1"` : ''} open><summary class="btn btn-sm ffold-sum">Filters${active ? ' (in use)' : ''}</summary>${form}</details>`;
+}
+
+module.exports = { ASSET_V, MARK, FONT_PRELOAD, icon, navCounts, layout, pageHeader, button, table, tile, flags, form, fieldRow, filterBar, filterFold };

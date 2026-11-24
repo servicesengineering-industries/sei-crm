@@ -4,6 +4,8 @@ const F = require('../format');
 const C = require('../cells');
 const UI = require('../ui');
 const A = require('../auth');
+const { OPT } = require('../modules');
+const { USERNAME_RE, baseUsername, uniqueUsername } = require('../usernames');
 const { HttpError } = require('../http');
 
 function requireAdmin(ctx) {
@@ -11,7 +13,7 @@ function requireAdmin(ctx) {
 }
 
 function roleHelp() {
-  return html`<section class="card"><div class="card-h"><h2>What each role can change</h2></div><div class="card-b"><dl class="dl">${Object.keys(A.ROLES).map((r) => html`<dt>${A.ROLES[r]}</dt><dd>${A.ROLE_HELP[r]}</dd>`)}</dl><p class="help">Everyone who can sign in can see every client. Only admins can delete records.</p></div></section>`;
+  return html`<section class="card"><div class="card-h"><h2>What each role can change</h2></div><div class="card-b"><dl class="dl">${Object.keys(A.ROLES).map((r) => html`<dt>${A.ROLES[r]}</dt><dd>${A.ROLE_HELP[r]}</dd>`)}<dt>Department head</dt><dd>On top of their role: gives jobs to people in their department and can change any job there. Admins can give jobs to anyone.</dd></dl><p class="help">Everyone signs in with their own user name and password, and can post updates on jobs given to them. Everyone who can sign in can see every client. Only admins can delete records.</p></div></section>`;
 }
 
 function userForm(ctx, { action, values, errors = {}, self = false, submit }) {
@@ -20,10 +22,15 @@ function userForm(ctx, { action, values, errors = {}, self = false, submit }) {
 ${C.csrf(ctx)}
 <div class="fgrid">
   <div class="field${errors.name ? ' has-error' : ''}"><label for="u_name">Name</label><input id="u_name" name="name" required value="${values.name || ''}">${err('name')}</div>
-  <div class="field${errors.email ? ' has-error' : ''}"><label for="u_email">Email (used to sign in)</label><input id="u_email" name="email" type="email" required value="${values.email || ''}" autocomplete="off">${err('email')}</div>
+  <div class="field${errors.username ? ' has-error' : ''}"><label for="u_username">User name (used to sign in)</label><input id="u_username" name="username" value="${values.username || ''}" autocomplete="off" autocapitalize="none" spellcheck="false">${err('username') || html`<div class="help">Like anil or anil.mehta. Leave blank to make one from the name.</div>`}</div>
+  <div class="field${errors.email ? ' has-error' : ''}"><label for="u_email">Email (optional)</label><input id="u_email" name="email" type="email" value="${values.email || ''}" autocomplete="off">${err('email')}</div>
   <div class="field${errors.role ? ' has-error' : ''}"><label for="u_role">Role</label>
     <select id="u_role" name="role"${attrIf(self, 'disabled')}>${Object.keys(A.ROLES).map((r) => html`<option value="${r}"${attrIf(r === values.role, 'selected')}>${A.ROLES[r]}</option>`)}</select>
     ${self ? html`<div class="help">You can't change your own role.</div>` : err('role')}</div>
+  <div class="field${errors.department ? ' has-error' : ''}"><label for="u_dept">Department</label>
+    <select id="u_dept" name="department"><option value="">—</option>${OPT.seiDept.map((d) => html`<option${attrIf(d === values.department, 'selected')}>${d}</option>`)}</select>
+    ${err('department') || html`<div class="help">Jobs are given within a department</div>`}</div>
+  <div class="field field-check"><label><input type="checkbox" name="is_head" value="1"${attrIf(values.is_head, 'checked')}> Head of this department</label><div class="help">Can give jobs to people in the department</div></div>
   ${values.id ? html`<div class="field field-check"><label><input type="checkbox" name="active" value="1"${attrIf(values.active, 'checked')}${attrIf(self, 'disabled')}> Can sign in</label><div class="help">${self ? "You can't disable your own account." : 'Untick when someone leaves. Their history stays.'}</div></div>` : ''}
 </div>
 <div class="form-actions spaced"><button class="btn btn-primary" type="submit">${submit}</button><a class="btn btn-quiet" href="/users">Cancel</a></div>
@@ -33,13 +40,23 @@ ${C.csrf(ctx)}
 function validateUser(ctx, body, id) {
   const errors = {};
   const name = String(body.name || '').trim().slice(0, 100);
-  const email = String(body.email || '').trim().toLowerCase().slice(0, 200);
+  const email = String(body.email || '').trim().toLowerCase().slice(0, 200) || null;
   const role = String(body.role || '');
   if (!name) errors.name = 'Required';
-  if (!C.EMAIL_RE.test(email)) errors.email = 'Enter an email address';
-  else if (ctx.db.get('SELECT id FROM users WHERE email = :email AND id <> :id', { email, id: id || 0 })) errors.email = 'Someone already uses this email';
+  const taken = (u) => !!ctx.db.get('SELECT id FROM users WHERE username = :u AND id <> :id', { u, id: id || 0 });
+  let username = String(body.username || '').trim().toLowerCase().slice(0, 60);
+  if (!username && name) username = uniqueUsername(baseUsername(name), taken);
+  if (!username) errors.username = 'Required';
+  else if (!USERNAME_RE.test(username)) errors.username = '2 to 30 letters or digits, and . - _ inside. No spaces.';
+  else if (taken(username)) errors.username = 'Someone already has this user name';
+  if (email && !C.EMAIL_RE.test(email)) errors.email = 'Enter an email address, or leave it blank';
+  else if (email && ctx.db.get('SELECT id FROM users WHERE email = :email AND id <> :id', { email, id: id || 0 })) errors.email = 'Someone already uses this email';
   if (!A.ROLES[role]) errors.role = 'Pick a role';
-  return { errors, values: { name, email, role } };
+  const department = OPT.seiDept.includes(body.department) ? body.department : null;
+  const isHead = body.is_head ? 1 : 0;
+  if (body.department && !department) errors.department = 'Pick one of the departments';
+  else if (isHead && !department) errors.department = 'A department head needs a department';
+  return { errors, values: { name, username, email, role, department, is_head: isHead } };
 }
 
 function passwordShown(ctx, user, title, intro) {
@@ -47,7 +64,7 @@ function passwordShown(ctx, user, title, intro) {
     const body = html`
 ${UI.pageHeader(title, intro)}
 <div class="card"><div class="card-b">
-<p>One-time password for <b>${user.name}</b> (${user.email}):</p>
+<p>One-time password for <b>${user.name}</b>, who signs in as <b>${user.username}</b>:</p>
 <p><span class="temp-pw">${password}</span></p>
 <p class="help">Give it to them in person or by phone. It is shown only once. They will choose their own password the first time they sign in.</p>
 <div class="form-actions spaced"><a class="btn btn-primary" href="/users">Back to users</a></div>
@@ -62,8 +79,10 @@ function register(router) {
     const users = ctx.db.all('SELECT * FROM users ORDER BY active DESC, name');
     const cols = [
       { label: 'Name', render: (u) => html`<a class="rowlink" href="/users/${u.id}/edit">${u.name}</a>${u.id === ctx.user.id ? html`<span class="sub">You</span>` : ''}` },
-      { label: 'Email', render: (u) => u.email },
+      { label: 'User name', render: (u) => html`<b>${u.username}</b>` },
+      { label: 'Email', render: (u) => C.text(u.email) },
       { label: 'Role', render: (u) => C.badge(A.ROLES[u.role], u.role === 'admin' ? 'info' : 'muted') },
+      { label: 'Department', render: (u) => (u.department ? html`${u.department}${u.is_head ? html` ${C.badge('Head')}` : ''}` : C.dash) },
       { label: 'Status', render: (u) => (u.active ? (u.must_change_password ? C.badge('Not signed in yet', 'warn') : C.badge('Active', 'ok')) : C.badge('Disabled', 'muted')) },
       { label: 'Last sign-in', render: (u) => (u.last_login_at ? F.fmtDateTime(u.last_login_at) : C.dash) },
     ];
@@ -82,7 +101,8 @@ function register(router) {
       return ctx.page('Add user', html`<p class="crumbs"><a href="/users">← Users</a></p>${UI.pageHeader('Add user', '')}<div class="card"><div class="card-b">${userForm(ctx, { action: '/users/new', values, errors, submit: 'Add user' })}</div></div>`, { active: 'users', status: 422 });
     }
     const password = A.tempPassword();
-    const id = ctx.db.run('INSERT INTO users (name, email, role, password_hash, must_change_password) VALUES (:name, :email, :role, :hash, 1)', { ...values, hash: A.hashPassword(password) }).id;
+    const id = ctx.db.run(`INSERT INTO users (name, username, email, role, department, is_head, password_hash, must_change_password)
+                           VALUES (:name, :username, :email, :role, :department, :is_head, :hash, 1)`, { ...values, hash: A.hashPassword(password) }).id;
     ctx.audit({ entity: 'users', entityId: id, action: 'created', summary: `added user ${values.name} (${A.ROLES[values.role]})` });
     passwordShown(ctx, values, 'User added', `${values.name} can now sign in.`)(password);
   });
@@ -111,9 +131,12 @@ function register(router) {
       return ctx.page(u.name, html`${UI.pageHeader(u.name, '')}<div class="card"><div class="card-b">${userForm(ctx, { action: `/users/${id}/edit`, values: { ...values, id, active }, errors, self, submit: 'Save changes' })}</div></div>`, { active: 'users', status: 422 });
     }
     ctx.db.tx(() => {
-      ctx.db.run("UPDATE users SET name = :name, email = :email, role = :role, active = :active, updated_at = datetime('now') WHERE id = :id", { ...values, active, id });
+      ctx.db.run(`UPDATE users SET name = :name, username = :username, email = :email, role = :role, department = :department, is_head = :is_head,
+                  active = :active, updated_at = datetime('now') WHERE id = :id`, { ...values, active, id });
       if (!active) ctx.db.run('DELETE FROM sessions WHERE user_id = :id', { id });
-      ctx.audit({ entity: 'users', entityId: id, action: 'updated', summary: `updated user ${values.name}${u.role !== values.role ? `: role ${A.ROLES[u.role]} → ${A.ROLES[values.role]}` : ''}${u.active && !active ? ', disabled sign-in' : ''}` });
+      const deptChange = (u.department || null) !== values.department || !!u.is_head !== !!values.is_head
+        ? `, department ${values.department || 'none'}${values.is_head ? ' (head)' : ''}` : '';
+      ctx.audit({ entity: 'users', entityId: id, action: 'updated', summary: `updated user ${values.name}${u.role !== values.role ? `: role ${A.ROLES[u.role]} → ${A.ROLES[values.role]}` : ''}${deptChange}${u.active && !active ? ', disabled sign-in' : ''}` });
     });
     ctx.flash('ok', `Saved ${values.name}.`);
     ctx.redirect('/users');

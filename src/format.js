@@ -2,10 +2,14 @@
 // Dates are stored as 'YYYY-MM-DD' strings; timestamps as SQLite UTC 'YYYY-MM-DD HH:MM:SS'.
 
 let TZ = 'Asia/Kolkata';
-const setTimeZone = (tz) => { TZ = tz; };
+// Building an Intl.DateTimeFormat is slow (about 0.15 ms), and "today" is asked for once or twice
+// per row on long lists, so one is kept and rebuilt only when the time zone changes.
+let dayFormat = null;
+const setTimeZone = (tz) => { TZ = tz; dayFormat = null; };
 
 function isoDate(d = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d);
+  if (!dayFormat) dayFormat = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const parts = dayFormat.formatToParts(d);
   const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
   return `${p.year}-${p.month}-${p.day}`;
 }
@@ -67,7 +71,31 @@ function relDays(iso, t = today()) {
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
+// Planning weeks run Monday to Sunday and are stored by their Monday.
+const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const dayIndex = (iso) => (new Date(`${String(iso).slice(0, 10)}T00:00:00Z`).getUTCDay() + 6) % 7;
+const dayName = (iso) => DAYS[dayIndex(iso)];
+const weekOf = (iso) => addDays(iso, -dayIndex(iso));
+// A real calendar date: 2027-02-31 is refused, not rolled over into March.
+const isIsoDate = (s) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ''))) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
+
+// "23–29 Nov 2026", or "30 Nov – 6 Dec 2026" across a month end.
+function weekLabel(ws) {
+  const we = addDays(ws, 6);
+  const [y1, m1, d1] = ws.split('-').map(Number);
+  const [y2, m2, d2] = we.split('-').map(Number);
+  if (y1 !== y2) return `${fmtDate(ws)} – ${fmtDate(we)}`;
+  if (m1 !== m2) return `${d1} ${MONTHS[m1 - 1]} – ${d2} ${MONTHS[m2 - 1]} ${y2}`;
+  return `${d1}–${d2} ${MONTHS[m2 - 1]} ${y2}`;
+}
+const pct = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : null);
+
 module.exports = {
   setTimeZone, isoDate, today, addDays, daysBetween, fmtDate, fmtDateTime, localDay,
   money, money2, num, moneyShort, relDays, plural, cap,
+  DAYS, dayIndex, dayName, weekOf, weekLabel, isIsoDate, pct,
 };

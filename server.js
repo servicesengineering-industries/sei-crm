@@ -26,7 +26,8 @@ const server = http.createServer((req, res) => {
   });
 });
 server.headersTimeout = 30000;
-server.requestTimeout = 60000;
+// Five 8 MB photos over a slow mobile link can take a few minutes to arrive.
+server.requestTimeout = 300000;
 
 // Log instead of crashing if anything still slips through.
 process.on('unhandledRejection', (err) => { console.error('Unhandled rejection:', err); });
