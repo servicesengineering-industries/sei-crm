@@ -27,3 +27,18 @@ console.log(`Backup written to ${out}`);
 const old = fs.readdirSync(dir).filter((f) => f.endsWith('.db')).sort().reverse().slice(30);
 for (const f of old) fs.rmSync(path.join(dir, f));
 if (old.length) console.log(`Removed ${old.length} older backup(s).`);
+
+// Photos and PDFs: each file has its own random name and never changes, so copying the new ones
+// into backups/uploads/ keeps a full set. Files removed in the app stay in the backup.
+const uploads = path.join(cfg.dataDir, 'uploads');
+if (fs.existsSync(uploads)) {
+  const target = path.join(dir, 'uploads');
+  fs.mkdirSync(target, { recursive: true });
+  let copied = 0;
+  for (const f of fs.readdirSync(uploads)) {
+    if (fs.existsSync(path.join(target, f))) continue;
+    fs.copyFileSync(path.join(uploads, f), path.join(target, f));
+    copied += 1;
+  }
+  console.log(`Photos and documents: ${copied} new file(s) copied to ${target}`);
+}

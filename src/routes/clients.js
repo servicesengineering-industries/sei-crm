@@ -6,25 +6,45 @@ const UI = require('../ui');
 const { MODULES, OPT, RFQ_OPEN, sqlIn } = require('../modules');
 const { canEdit } = require('../auth');
 const { HttpError } = require('../http');
-const { dateParams, likeParam } = require('../crud');
+const { dateParams, likeParam, pager, PAGE_SIZE } = require('../crud');
 
 // One row per client with everything needed to judge how the relationship stands.
-const SUMMARY_SQL = `
+// Open POs and money owed are added up once for all clients (grouped joins), not per client, so
+// the client list stays quick as dispatches and payments pile up. `one` narrows both to the
+// client in :cid for a single client's page.
+const summarySql = (one) => `
 SELECT c.*, u.name AS owner_name,
+  COALESCE(od.open_orders, 0) AS open_orders, COALESCE(od.late_orders, 0) AS late_orders,
+  COALESCE(m.unpaid_invoices, 0) AS unpaid_invoices, COALESCE(m.outstanding, 0) AS outstanding, COALESCE(m.overdue_amount, 0) AS overdue_amount,
   (SELECT MAX(occurred_on) FROM activities a WHERE a.client_id = c.id) AS last_contact,
   (SELECT COUNT(*) FROM contacts ct WHERE ct.client_id = c.id AND ct.active = 1) AS contact_count,
   (SELECT COUNT(*) FROM followups f WHERE f.client_id = c.id AND f.status = 'Open') AS open_followups,
   (SELECT COUNT(*) FROM followups f WHERE f.client_id = c.id AND f.status = 'Open' AND f.due_on < :t) AS overdue_followups,
   (SELECT COUNT(*) FROM rfqs r WHERE r.client_id = c.id AND r.status IN (${sqlIn(RFQ_OPEN)})) AS open_rfqs,
   (SELECT COUNT(*) FROM rfqs r WHERE r.client_id = c.id AND r.status IN ('Quoted', 'Negotiation') AND r.quoted_on <= :tm14) AS stale_quotes,
-  (SELECT COUNT(*) FROM v_orders o WHERE o.client_id = c.id AND o.status = 'Open' AND o.pending > 0) AS open_orders,
-  (SELECT COUNT(*) FROM v_orders o WHERE o.client_id = c.id AND o.status = 'Open' AND o.pending > 0 AND o.due_on < :t) AS late_orders,
-  (SELECT COUNT(*) FROM v_invoices i WHERE i.client_id = c.id AND i.balance > 0.5) AS unpaid_invoices,
-  (SELECT COALESCE(SUM(i.balance), 0) FROM v_invoices i WHERE i.client_id = c.id AND i.balance > 0.5) AS outstanding,
-  (SELECT COALESCE(SUM(i.balance), 0) FROM v_invoices i WHERE i.client_id = c.id AND i.balance > 0.5 AND i.due_on < :t) AS overdue_amount,
   (SELECT COUNT(*) FROM complaints q WHERE q.client_id = c.id AND q.status <> 'Closed') AS open_complaints,
   (SELECT COUNT(*) FROM complaints q WHERE q.client_id = c.id AND q.status <> 'Closed' AND q.severity = 'Critical') AS critical_complaints
-FROM clients c LEFT JOIN users u ON u.id = c.owner_id`;
+FROM clients c LEFT JOIN users u ON u.id = c.owner_id
+LEFT JOIN (
+  SELECT o.client_id, COUNT(*) AS open_orders, COUNT(CASE WHEN o.due_on < :t THEN 1 END) AS late_orders
+  FROM orders o
+  LEFT JOIN (SELECT order_id, SUM(qty) AS sent FROM dispatches
+             WHERE order_id IN (SELECT id FROM orders WHERE status = 'Open'${one ? ' AND client_id = :cid' : ''}) GROUP BY order_id) d ON d.order_id = o.id
+  WHERE o.status = 'Open' AND o.qty - COALESCE(d.sent, 0) > 0${one ? ' AND o.client_id = :cid' : ''}
+  GROUP BY o.client_id
+) od ON od.client_id = c.id
+LEFT JOIN (
+  SELECT b.client_id, COUNT(*) AS unpaid_invoices, SUM(b.balance) AS outstanding, SUM(CASE WHEN b.due_on < :t THEN b.balance ELSE 0 END) AS overdue_amount
+  FROM (SELECT i.client_id, i.due_on, ROUND(i.amount - COALESCE(p.paid, 0), 2) AS balance
+        FROM invoices i
+        LEFT JOIN (SELECT invoice_id, SUM(amount + COALESCE(deduction, 0)) AS paid FROM payments
+                   ${one ? 'WHERE invoice_id IN (SELECT id FROM invoices WHERE client_id = :cid)' : ''} GROUP BY invoice_id) p ON p.invoice_id = i.id
+        ${one ? 'WHERE i.client_id = :cid' : ''}) b
+  WHERE b.balance > 0.5
+  GROUP BY b.client_id
+) m ON m.client_id = c.id${one ? ' WHERE c.id = :cid' : ''}`;
+const SUMMARY_ALL = summarySql(false);
+const SUMMARY_ONE = summarySql(true);
 
 function clientFlags(r) {
   const out = [];
@@ -45,7 +65,8 @@ function clientFlags(r) {
 }
 
 function clientSummaries(ctx, { where = '', params = {} } = {}) {
-  const rows = ctx.db.all(`SELECT * FROM (${SUMMARY_SQL}) x${where ? ` WHERE ${where}` : ''} ORDER BY name`, { ...dateParams(), ...params });
+  const sql = params.cid != null ? SUMMARY_ONE : SUMMARY_ALL;
+  const rows = ctx.db.all(`SELECT * FROM (${sql}) x${where ? ` WHERE ${where}` : ''} ORDER BY name`, { ...dateParams(), ...params });
   for (const r of rows) {
     r.flags = clientFlags(r);
     r.score = r.flags.reduce((s, f) => s + f.weight, 0);
@@ -77,6 +98,11 @@ function listPage(ctx) {
   if (sort === 'attention') rows.sort(byAttention);
   if (sort === 'outstanding') rows.sort((a, b) => b.outstanding - a.outstanding || a.name.localeCompare(b.name));
   if (q.attention === '1') rows = rows.filter((r) => r.score >= 1);
+  // 100 a page, like every other list; the count and the sort still cover every client.
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const page = Math.min(pages, Math.max(1, Number.parseInt(q.page, 10) || 1));
+  const shown = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const range = pages > 1 ? ` · showing ${F.num((page - 1) * PAGE_SIZE + 1)}–${F.num((page - 1) * PAGE_SIZE + shown.length)}` : '';
 
   const users = ctx.db.all('SELECT id, name FROM users WHERE active = 1 ORDER BY name');
   const t = F.today();
@@ -94,9 +120,9 @@ function listPage(ctx) {
   const sel = (name, label, options, current) => html`<select name="${name}" aria-label="${label}">${options.map(([v, l]) => html`<option value="${v}"${attrIf(v === current, 'selected')}>${l}</option>`)}</select>`;
   const add = canEdit(ctx.user, MODULES.clients) ? UI.button('/clients/new', 'New client', 'primary') : '';
   const body = html`
-${UI.pageHeader('Clients', 'Every customer with what is open, owed, late or unhappy.', add)}
+${UI.pageHeader('Clients', 'Every client with what is open, owed, late or unhappy.', add)}
 <div class="filterbar">
-<form class="filters" method="get" action="/clients" data-autosubmit>
+${UI.filterFold(text || status || segment || q.owner || q.attention, html`<form class="filters" method="get" action="/clients" data-autosubmit>
   <input type="search" name="q" value="${text}" placeholder="Search name, city, vendor code, GSTIN" aria-label="Search clients">
   ${sel('status', 'Status', [['', 'Status: all'], ...OPT.clientStatus.map((s) => [s, s])], status)}
   ${sel('segment', 'Segment', [['', 'Segment: all'], ...OPT.segment.map((s) => [s, s])], segment)}
@@ -105,10 +131,11 @@ ${UI.pageHeader('Clients', 'Every customer with what is open, owed, late or unha
   <label class="check-inline"><input type="checkbox" name="attention" value="1"${attrIf(q.attention === '1', 'checked')}> Needs attention only</label>
   <button class="btn btn-sm" type="submit">Apply</button>
   ${text || status || segment || q.owner || q.attention ? html`<a class="clear" href="/clients">Clear filters</a>` : ''}
-</form>
+</form>`)}
 </div>
-<p class="count">${F.plural(rows.length, 'client')}</p>
-${UI.table(cols, rows, { ctx, empty: 'No clients match these filters.' })}
+<p class="count">${F.plural(rows.length, 'client')}${range}</p>
+${UI.table(cols, shown, { ctx, empty: 'No clients match these filters.' })}
+${pager(ctx, page, pages)}
 <p class="export"><a href="/clients.csv">Download all clients as CSV</a></p>`;
   ctx.page('Clients', body, { active: 'clients' });
 }
@@ -176,7 +203,7 @@ function overviewTab(ctx, c) {
                        WHERE a.client_id = :id ORDER BY a.occurred_on DESC, a.id DESC LIMIT 80`, { id: c.id });
   const events = db.all(`SELECT l.id, l.at, l.entity AS type, l.summary AS title, u.name AS user_name
                          FROM audit_log l LEFT JOIN users u ON u.id = l.user_id
-                         WHERE l.client_id = :id AND l.entity <> 'activities' ORDER BY l.at DESC, l.id DESC LIMIT 80`, { id: c.id });
+                         WHERE l.client_id = :id AND NOT (l.entity = 'activities' AND l.action = 'created') ORDER BY l.at DESC, l.id DESC LIMIT 80`, { id: c.id });
   const timeline = [
     ...acts.map((a) => ({ ...a, kind: 'activity' })),
     ...events.map((e) => ({ ...e, kind: 'event', day: F.localDay(e.at) })),
@@ -213,7 +240,7 @@ function moduleTab(ctx, c, key) {
   const ret = encodeURIComponent(`/clients/${c.id}?tab=${key}`);
   const add = canEdit(ctx.user, mod) ? UI.button(`/${key}/new?client_id=${c.id}&return=${ret}`, `Add ${mod.singular}`, 'primary') : '';
   return html`<div class="tab-actions"><a class="btn btn-quiet" href="/${key}?client=${c.id}&view=all">Open in ${mod.plural}</a>${add}</div>
-${UI.table(cols, rows, { ctx, empty: `No ${mod.plural.toLowerCase()} for ${c.name} yet.` })}`;
+${UI.table(cols, rows, { ctx, empty: `Nothing here for ${c.name} yet.` })}`;
 }
 
 function detailsTab(ctx, c) {

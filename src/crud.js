@@ -1,4 +1,6 @@
 'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
 const { html } = require('./html');
 const F = require('./format');
 const C = require('./cells');
@@ -8,19 +10,28 @@ const { canEdit, isAdmin } = require('./auth');
 const { HttpError, safeReturn } = require('./http');
 
 // type -> [table, belongs to a client?]
-const FK = { client: ['clients', false], contact: ['contacts', true], user: ['users', false], rfq: ['rfqs', true], order: ['orders', true], invoice: ['invoices', true] };
-const PREFILL_KEYS = ['client_id', 'contact_id', 'order_id', 'invoice_id', 'rfq_id'];
+const FK = {
+  client: ['clients', false], contact: ['contacts', true], user: ['users', false], rfq: ['rfqs', true], order: ['orders', true], invoice: ['invoices', true],
+  supplier: ['suppliers', false], asset: ['assets', false], machine: ['assets', false], assignee: ['users', false],
+};
+const FK_TYPES = new Set(Object.keys(FK));
+const PREFILL_KEYS = ['client_id', 'contact_id', 'order_id', 'invoice_id', 'rfq_id', 'asset_id', 'supplier_id'];
 
 function dateParams() {
   const t = F.today();
   const d = (n) => F.addDays(t, n);
-  return { t, tm7: d(-7), tm14: d(-14), tm30: d(-30), tm60: d(-60), tm90: d(-90), tp3: d(3), tp7: d(7) };
+  const wk = F.weekOf(t); // this Monday
+  return {
+    t, tm7: d(-7), tm14: d(-14), tm30: d(-30), tm60: d(-60), tm90: d(-90), tp3: d(3), tp7: d(7),
+    wk, wkp: F.addDays(wk, -7), wkn: F.addDays(wk, 7), wkne: F.addDays(wk, 13), tp30: d(30),
+  };
 }
 
 const likeParam = (q) => `%${String(q).replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
 
-function requireEdit(ctx, mod) {
-  if (!canEdit(ctx.user, mod)) throw new HttpError(403, `Your role can't change ${mod.plural.toLowerCase()}. Ask an admin if you need access.`);
+function requireEdit(ctx, mod, row) {
+  if (canEdit(ctx.user, mod, row)) return;
+  throw new HttpError(403, mod.forbidden || `Your role can't change ${mod.plural.toLowerCase()}. Ask an admin if you need access.`);
 }
 
 function resolveDefault(f, ctx) {
@@ -28,23 +39,39 @@ function resolveDefault(f, ctx) {
   return typeof f.default === 'function' ? f.default(ctx) : f.default;
 }
 
+// An empty required field says what to do, in the words of its label ("Enter the part").
+const PICKED = new Set(['select', 'client', 'contact', 'user', 'rfq', 'order', 'invoice', 'supplier', 'asset', 'machine', 'assignee']);
+function requiredError(f) {
+  if (f.type === 'date') return 'Pick a date';
+  if (PICKED.has(f.type)) return 'Choose one from the list';
+  const label = f.label.replace(/\s*\([^)]*\)$/, '');
+  return `Enter the ${/^[A-Z][a-z]/.test(label) ? label[0].toLowerCase() + label.slice(1) : label}`;
+}
+
 function coerce(f, input) {
   let v = input == null ? '' : String(input).trim();
-  if (v === '') return f.required ? { error: 'Required' } : { value: null };
+  if (v === '') return f.required ? { error: requiredError(f) } : { value: null };
   switch (f.type) {
     case 'int': {
       const n = Number(v.replace(/[,\s]/g, ''));
       const min = f.min ?? 0;
-      if (!Number.isInteger(n) || n < min) return { error: min > 0 ? `Enter a whole number of at least ${min}` : 'Enter a whole number' };
+      if (!Number.isInteger(n) || n < min) return { error: `Enter a whole number, ${min} or more` };
       if (n > 1e9) return { error: 'That number is too large' };
       return { value: n };
     }
     case 'money': case 'money2': {
       const n = Number(v.replace(/[,\s₹]/g, ''));
-      if (!Number.isFinite(n) || n < 0) return { error: 'Enter an amount in rupees' };
+      if (!Number.isFinite(n) || n < 0) return { error: 'Enter an amount in rupees, 0 or more' };
       if (n > 1e12) return { error: 'That amount is too large' };
       if (f.positive && n <= 0) return { error: 'Enter an amount above zero' };
       return { value: Math.round(n * 100) / 100 };
+    }
+    case 'decimal': {
+      const n = Number(v.replace(/[,\s]/g, ''));
+      if (!Number.isFinite(n) || n < 0) return { error: 'Enter a quantity' };
+      if (n > 1e9) return { error: 'That number is too large' };
+      if (f.positive && n <= 0) return { error: 'Enter a quantity above zero' };
+      return { value: Math.round(n * 1000) / 1000 };
     }
     case 'date': {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return { error: 'Enter a date' };
@@ -69,11 +96,11 @@ function coerce(f, input) {
         return { value: u };
       } catch { return { error: 'Enter a web address like www.example.com' }; }
     }
-    case 'client': case 'contact': case 'user': case 'rfq': case 'order': case 'invoice': {
-      const n = Number(v);
-      return Number.isInteger(n) && n > 0 ? { value: n } : { error: 'Pick one of the options' };
-    }
     default: {
+      if (FK_TYPES.has(f.type)) {
+        const n = Number(v);
+        return Number.isInteger(n) && n > 0 ? { value: n } : { error: 'Pick one of the options' };
+      }
       if (f.upper) v = v.toUpperCase();
       if (f.pattern && !f.pattern.test(v)) return { error: f.patternMsg || 'Check the format' };
       const max = f.type === 'textarea' ? 5000 : 200;
@@ -95,7 +122,7 @@ function readForm(ctx, mod, body, existing) {
     else target[f.name] = r.value;
   }
   // Child records (dispatches, payments) take their client from the parent.
-  if (mod.parent && data[mod.parent.field] != null) {
+  if (mod.parent && !mod.parent.noClient && data[mod.parent.field] != null) {
     const p = ctx.db.get(`SELECT client_id FROM ${mod.parent.table} WHERE id = :id`, { id: data[mod.parent.field] });
     if (p) data.client_id = p.client_id;
   }
@@ -118,7 +145,10 @@ function readForm(ctx, mod, body, existing) {
 function dependentSummary(ctx, mod, id) {
   const parts = [];
   for (const d of mod.dependents || []) {
-    const n = ctx.db.get(`SELECT COUNT(*) AS n FROM ${d.table} WHERE ${d.fk} = :id`, { id }).n;
+    // `where` narrows what counts as history (for example, only checklist days that are past or filled in).
+    const n = d.where
+      ? ctx.db.get(`SELECT COUNT(*) AS n FROM ${d.table} WHERE ${d.fk} = :id AND (${d.where})`, { id, t: F.today() }).n
+      : ctx.db.get(`SELECT COUNT(*) AS n FROM ${d.table} WHERE ${d.fk} = :id`, { id }).n;
     if (n) parts.push(F.plural(n, d.one, d.many));
   }
   if (parts.length < 2) return parts[0] || '';
@@ -153,7 +183,7 @@ function describeChanges(mod, before, after) {
 
 function backTo(mod, clientId, id) {
   if (mod.key === 'clients') return id ? `/clients/${id}` : '/clients';
-  if (clientId) return `/clients/${clientId}?tab=${mod.tab || 'overview'}`;
+  if (clientId && !mod.homeList) return `/clients/${clientId}?tab=${mod.tab || 'overview'}`;
   return `/${mod.key}`;
 }
 
@@ -162,17 +192,23 @@ function backTo(mod, clientId, id) {
 function currentFilters(ctx, mod) {
   const q = ctx.query;
   const views = mod.views || [];
-  const view = views.some((v) => v.key === q.view) ? q.view : mod.defaultView || (views[0] && views[0].key) || '';
-  const f = { view, q: (q.q || '').trim().slice(0, 100), client: /^\d+$/.test(q.client || '') ? q.client : '' };
+  // Opening a plan at a given week (?week=) shows that week, whatever view was last used.
+  const week = mod.weekly && F.isIsoDate(q.week) ? F.weekOf(q.week) : '';
+  const view = week ? 'all' : views.some((v) => v.key === q.view) ? q.view : mod.defaultView || (views[0] && views[0].key) || '';
+  const f = { view, week, q: (q.q || '').trim().slice(0, 100), client: !mod.noClient && /^\d+$/.test(q.client || '') ? q.client : '' };
   for (const flt of mod.filters || []) f[flt.name] = q[flt.name] || '';
   return f;
 }
 
-function listRows(ctx, mod, filters, limit = 501) {
+function listRows(ctx, mod, filters, limit = 501, cols = null) {
   const where = [];
-  const params = dateParams();
+  const params = {
+    ...dateParams(), me: ctx.user.id, dept: ctx.user.department || '',
+    head: ctx.user.is_head ? 1 : 0, admin: ctx.user.role === 'admin' ? 1 : 0,
+  };
   const view = (mod.views || []).find((v) => v.key === filters.view);
   if (view && view.where) where.push(`(${view.where})`);
+  if (filters.week) { where.push('week_start = :week'); params.week = filters.week; }
   if (filters.client) { where.push(`${mod.key === 'clients' ? 'id' : 'client_id'} = :client`); params.client = Number(filters.client); }
   for (const flt of mod.filters || []) {
     let v = filters[flt.name];
@@ -189,22 +225,46 @@ function listRows(ctx, mod, filters, limit = 501) {
     where.push(`(${mod.search.map((c) => `${c} LIKE :q ESCAPE '\\'`).join(' OR ')})`);
     params.q = likeParam(filters.q);
   }
-  const sql = `SELECT * FROM (${mod.listSql}) x${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${mod.order} LIMIT ${limit}`;
+  // A CSV asks for every row (no limit) and only its own columns, which lets SQLite skip the rest.
+  const sql = `SELECT ${cols ? cols.join(', ') : '*'} FROM (${mod.listSql}) x${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${mod.order}${limit ? ` LIMIT ${limit}` : ''}`;
   return ctx.db.all(sql, params);
+}
+
+// Long lists show 100 rows a page. Totals above the list still count every row that matches.
+const PAGE_SIZE = 100;
+const MAX_ROWS = 2000;
+
+function pager(ctx, page, pages) {
+  if (pages < 2) return '';
+  const link = (n, label, rel) => {
+    const p = new URLSearchParams(ctx.url.search);
+    if (n > 1) p.set('page', String(n)); else p.delete('page');
+    const qs = p.toString();
+    return html`<a class="chip" rel="${rel}" href="${ctx.url.pathname}${qs ? `?${qs}` : ''}">${label}</a>`;
+  };
+  return html`<nav class="pager chips" aria-label="Pages">${page > 1 ? link(page - 1, '← Previous', 'prev') : ''}<span class="pager-at">Page ${page} of ${pages}</span>${page < pages ? link(page + 1, 'Next →', 'next') : ''}</nav>`;
 }
 
 function listPage(ctx, mod) {
   const filters = currentFilters(ctx, mod);
-  const rows = listRows(ctx, mod, filters);
-  const more = rows.length > 500;
-  if (more) rows.length = 500;
-  const add = canEdit(ctx.user, mod) && !mod.parent ? UI.button(`/${mod.key}/new`, `New ${mod.singular}`, 'primary') : '';
+  const rows = listRows(ctx, mod, filters, MAX_ROWS + 1);
+  const more = rows.length > MAX_ROWS;
+  if (more) rows.length = MAX_ROWS;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const page = Math.min(pages, Math.max(1, Number.parseInt(ctx.query.page, 10) || 1));
+  const shown = rows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const range = pages > 1 ? ` · showing ${F.num((page - 1) * PAGE_SIZE + 1)}–${F.num((page - 1) * PAGE_SIZE + shown.length)}` : '';
+  const add = !mod.readOnly && canEdit(ctx.user, mod) && (!mod.parent || mod.parent.standalone) ? UI.button(`/${mod.key}/new`, `New ${mod.singular}`, 'primary') : '';
+  const planner = mod.weekly ? UI.button(`/planning${filters.week ? `?week=${filters.week}` : ''}`, 'Week planner') : '';
   const csvHref = `/${mod.key}.csv${ctx.url.search}`;
+  const many = mod.many || (mod.key === 'activities' ? 'activities' : undefined);
   const body = html`
-${UI.pageHeader(mod.plural, mod.help, add)}
+${UI.pageHeader(mod.plural, mod.help, html`${mod.listActions ? mod.listActions(ctx) : ''}${planner}${add}`)}
 ${UI.filterBar(ctx, mod, filters)}
-<p class="count">${F.plural(rows.length, mod.singular, mod.key === 'activities' ? 'activities' : undefined)}${more ? ' (first 500 shown)' : ''}</p>
-${UI.table(mod.columns, rows, { ctx, empty: filters.q || filters.client ? 'Nothing matches these filters.' : `No ${mod.plural.toLowerCase()} in this view yet.` })}
+${mod.listSummary ? mod.listSummary(ctx, rows, filters) : ''}
+<p class="count">${F.plural(rows.length, mod.singular, many)}${filters.week ? ` in the week of ${F.weekLabel(filters.week)}` : ''}${more ? ` (the first ${F.num(MAX_ROWS)}: narrow the filters or download the CSV for all)` : ''}${range}</p>
+${UI.table(mod.columns, shown, { ctx, empty: filters.q || filters.client || filters.week ? 'Nothing matches these filters. Clear the filters to see more.' : (mod.views || []).length ? 'Nothing in this view. Choose another view above.' : 'Nothing here yet.' })}
+${pager(ctx, page, pages)}
 <p class="export"><a href="${csvHref}">Download as CSV</a> (opens in Excel)</p>`;
   ctx.page(mod.plural, body, { active: mod.key });
 }
@@ -221,12 +281,18 @@ function csvCell(v) {
 }
 
 function csvExport(ctx, mod) {
-  const rows = listRows(ctx, mod, currentFilters(ctx, mod), 100000);
+  const rows = listRows(ctx, mod, currentFilters(ctx, mod), null, mod.csv);
   const keys = mod.csv;
   const label = (k) => {
     const f = mod.fields.find((x) => x.name === k);
     if (f) return f.label;
-    return { client_name: 'Client', contact_name: 'Contact', owner_name: 'Owner', user_name: 'Entered by', assigned_name: 'Assigned to' }[k]
+    return {
+      client_name: 'Client', contact_name: 'Contact', owner_name: 'Owner', user_name: 'Entered by', assigned_name: 'Assigned to',
+      supplier_name: 'Supplier', asset_code: 'Machine / tool code', asset_name: 'Machine / tool', responsible_name: 'Responsible',
+      supervisor_name: 'Supervisor', approved_name: 'Approved by', last_done_on: 'Last PM done', next_pm_on: 'Next PM due',
+      planned_value: 'Planned value', actual_qty: 'Dispatched qty', actual_value: 'Dispatched value', balance_qty: 'Balance qty',
+      week_start: 'Week starting',
+    }[k]
       || k.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
   };
   const lines = [keys.map((k) => csvCell(label(k))).join(',')];
@@ -239,7 +305,7 @@ function csvExport(ctx, mod) {
 // ---------- forms ----------
 
 function childSection(ctx, child, parentMod, parentId) {
-  const rows = ctx.db.all(`SELECT * FROM (${child.listSql}) x WHERE ${child.parent.field} = :pid ORDER BY ${child.order}`, { pid: parentId });
+  const rows = ctx.db.all(`SELECT * FROM (${child.listSql}) x WHERE ${child.parent.field} = :pid ORDER BY ${child.childOrder || child.order}`, { pid: parentId });
   const back = `/${parentMod.key}/${parentId}/edit`;
   const add = canEdit(ctx.user, child)
     ? UI.button(`/${child.key}/new?${child.parent.field}=${parentId}&return=${encodeURIComponent(back)}`, `Add ${child.singular}`, 'primary btn-sm')
@@ -253,7 +319,7 @@ ${UI.table(child.childColumns, rows, { ctx, empty: child.emptyChild })}
 
 function formPage(ctx, mod, { id = null, values, errors = {}, status = 200 }) {
   const editing = id != null;
-  const editable = canEdit(ctx.user, mod);
+  const editable = canEdit(ctx.user, mod, editing ? values : undefined);
   const returnTo = safeReturn(ctx.method === 'POST' ? ctx.body.return : ctx.query.return, '');
   const clientId = mod.key === 'clients' ? id : Number(values.client_id) || null;
   const client = clientId ? ctx.db.get('SELECT id, name FROM clients WHERE id = :id', { id: clientId }) : null;
@@ -273,16 +339,17 @@ function formPage(ctx, mod, { id = null, values, errors = {}, status = 200 }) {
   const body = html`
 <p class="crumbs"><a href="${back}">← Back</a></p>
 ${UI.pageHeader(heading, sub, extra)}
-${!editable ? html`<p class="alert alert-info">You can see this ${mod.singular}, but your role can't change it.</p>` : ''}
+${!editable ? html`<p class="alert alert-info">${mod.readonlyNote || html`You can see this ${mod.singular}, but your role can't change it.`}</p>` : ''}
 <div class="card"><div class="card-b">${UI.form(ctx, mod, {
     action: editing ? `/${mod.key}/${id}/edit` : `/${mod.key}/new`,
     values, errors, readonly: !editable, editing, returnTo, cancel: back,
     submit: editing ? 'Save changes' : `Add ${mod.singular}`,
   })}</div></div>
+${editing && mod.formExtra ? mod.formExtra(ctx, id, values) : ''}
 ${kids}
 ${meta}
 ${del}`;
-  ctx.page(heading, body, { active: mod.parent ? mod.parent.module : mod.key, status });
+  ctx.page(heading, body, { active: mod.parent && !mod.parent.standalone ? mod.parent.module : mod.key, status });
 }
 
 function newPage(ctx, mod) {
@@ -326,8 +393,8 @@ function create(ctx, mod) {
 }
 
 function update(ctx, mod, id) {
-  requireEdit(ctx, mod);
   const existing = getRow(ctx, mod, id);
+  requireEdit(ctx, mod, existing);
   const { data, errors } = readForm(ctx, mod, ctx.body, existing);
   if (mod.key === 'clients' && !errors.name && ctx.db.get('SELECT id FROM clients WHERE name = :name AND id <> :id', { name: data.name, id })) {
     errors.name = 'Another client already has this name';
@@ -351,16 +418,23 @@ function update(ctx, mod, id) {
       const clientId = mod.key === 'clients' ? id : data.client_id;
       ctx.audit({ clientId, entity: mod.key, entityId: id, action: 'updated', summary: `updated ${mod.singular} “${mod.title({ ...existing, ...data })}”: ${changes}` });
     }
+    if (mod.afterUpdate) mod.afterUpdate(ctx, id, data, existing);
   });
   ctx.flash('ok', 'Changes saved.');
   ctx.redirect(safeReturn(ctx.body.return, backTo(mod, data.client_id, id)));
 }
 
+const ATTACHED = {
+  jobs: { entity: 'job_updates', ids: 'SELECT id FROM job_updates WHERE job_id = :id' },
+  checklists: { entity: 'checklist_runs', ids: 'SELECT id FROM checklist_runs WHERE checklist_id = :id' },
+  compliance_items: { entity: 'compliance_filings', ids: 'SELECT id FROM compliance_filings WHERE item_id = :id' },
+};
+
 function remove(ctx, mod, id) {
   if (!isAdmin(ctx.user)) throw new HttpError(403, 'Only an admin can delete records.');
   const existing = getRow(ctx, mod, id);
   if (mod.key === 'clients') {
-    const linked = ['contacts', 'activities', 'followups', 'rfqs', 'orders', 'invoices', 'complaints']
+    const linked = ['contacts', 'activities', 'followups', 'rfqs', 'orders', 'invoices', 'complaints', 'sales_plans', 'production_plans', 'jobs']
       .reduce((n, t) => n + ctx.db.get(`SELECT COUNT(*) AS n FROM ${t} WHERE client_id = :id`, { id }).n, 0);
     if (linked > 0) {
       ctx.flash('error', `${existing.name} has ${F.plural(linked, 'linked record')}, so it can't be deleted. Set its status to Dormant or Lost instead.`);
@@ -373,10 +447,16 @@ function remove(ctx, mod, id) {
       return ctx.redirect(`/${mod.key}/${id}/edit`);
     }
   }
+  // Photos and PDFs hang off the record's updates, daily copies or filings: they go with it.
+  const files = ATTACHED[mod.key]
+    ? ctx.db.all(`SELECT id, stored FROM attachments WHERE entity = :e AND entity_id IN (${ATTACHED[mod.key].ids})`, { e: ATTACHED[mod.key].entity, id })
+    : [];
   ctx.db.tx(() => {
-    ctx.audit({ clientId: mod.key === 'clients' ? null : existing.client_id, entity: mod.key, entityId: id, action: 'deleted', summary: `deleted ${mod.singular} “${mod.title(existing)}”` });
+    ctx.audit({ clientId: mod.key === 'clients' ? null : existing.client_id, entity: mod.key, entityId: id, action: 'deleted', summary: `deleted ${mod.singular} “${mod.title(existing)}”${files.length ? ` and ${F.plural(files.length, 'attached file')}` : ''}` });
+    for (const f of files) ctx.db.run('DELETE FROM attachments WHERE id = :id', { id: f.id });
     ctx.db.run(`DELETE FROM ${mod.table} WHERE id = :id`, { id });
   });
+  for (const f of files) fs.rmSync(path.join(ctx.cfg.dataDir, 'uploads', f.stored), { force: true });
   ctx.flash('ok', `${F.cap(mod.singular)} deleted.`);
   const fallback = mod.parent ? `/${mod.parent.module}/${existing[mod.parent.field]}/edit` : mod.key === 'clients' ? '/clients' : backTo(mod, existing.client_id, null);
   ctx.redirect(safeReturn(ctx.body.return, fallback));
@@ -386,6 +466,7 @@ function registerCrud(router, key) {
   const mod = MODULES[key];
   router.on('GET', `/${key}`, (ctx) => listPage(ctx, mod));
   router.on('GET', `/${key}.csv`, (ctx) => csvExport(ctx, mod));
+  if (mod.readOnly) return; // its records have their own pages
   router.on('GET', `/${key}/new`, (ctx) => newPage(ctx, mod));
   router.on('POST', `/${key}/new`, (ctx) => create(ctx, mod));
   router.on('GET', `/${key}/:id`, (ctx) => ctx.redirect(`/${key}/${ctx.params.id}/edit`));
@@ -394,4 +475,4 @@ function registerCrud(router, key) {
   router.on('POST', `/${key}/:id/delete`, (ctx) => remove(ctx, mod, Number(ctx.params.id)));
 }
 
-module.exports = { registerCrud, dateParams, likeParam, listRows, requireEdit };
+module.exports = { registerCrud, dateParams, likeParam, listRows, requireEdit, pager, PAGE_SIZE };

@@ -12,6 +12,7 @@
     "dev": "node --watch server.js",
     "demo": "node server.js --demo",
     "backup": "node scripts/backup.js",
+    "sheets": "node scripts/planning-template.js",
     "test": "node --test test/"
   }
 }

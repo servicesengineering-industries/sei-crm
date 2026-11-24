@@ -2,6 +2,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { openDb, seedClients } = require('./db');
+const { baseUsername } = require('./usernames');
+const uploads = require('./uploads');
 const { Router } = require('./router');
 const { HttpError, parseCookies, readBody, parseForm, toObject } = require('./http');
 const A = require('./auth');
@@ -70,29 +72,42 @@ function secureDataDir(cfg) {
 function ensureAdmin(db, cfg) {
   if (db.get('SELECT COUNT(*) AS n FROM users').n > 0) return;
   const password = A.tempPassword();
-  const id = db.run("INSERT INTO users (name, email, role, password_hash, must_change_password) VALUES ('Administrator', :email, 'admin', :hash, 1)", {
-    email: cfg.adminEmail, hash: A.hashPassword(password),
+  const username = baseUsername('Administrator', cfg.adminEmail); // admin@sei.local -> admin
+  const id = db.run("INSERT INTO users (name, username, email, role, password_hash, must_change_password) VALUES ('Administrator', :username, :email, 'admin', :hash, 1)", {
+    username, email: cfg.adminEmail, hash: A.hashPassword(password),
   }).id;
   db.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('first_login_user', :id)", { id: String(id) });
   const file = firstLoginFile(cfg);
   fs.writeFileSync(file, [
     'SEI Client CRM: first admin sign-in',
     '',
-    `Address:  http://${isLoopback(cfg.host) || cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`,
-    `Email:    ${cfg.adminEmail}`,
+    `Address:   http://${isLoopback(cfg.host) || cfg.host === '0.0.0.0' ? 'localhost' : cfg.host}:${cfg.port}`,
+    `User name: ${username}`,
     `Password: ${password}`,
     '',
     'You will be asked to choose your own password after signing in.',
     'This file is deleted automatically when you do.',
     '',
   ].join('\n'), { mode: 0o600 });
-  console.log(`First run: created the admin account ${cfg.adminEmail}. Its one-time password is in ${file}`);
+  console.log(`First run: created the admin account "${username}". Its one-time password is in ${file}`);
+}
+
+// Secret for signing "known browser" cookies (see deviceToken in auth.js). Made once per database.
+function deviceKey(db) {
+  db.run("INSERT OR IGNORE INTO meta (key, value) VALUES ('device_key', :v)", { v: A.token(32) });
+  return db.get("SELECT value FROM meta WHERE key = 'device_key'").value;
 }
 
 function bootstrap(db, cfg) {
   const added = seedClients(db);
   if (added) console.log(`Added ${added} SEI customers to the client list.`);
-  if (cfg.demo) require('./demo').seedDemo(db);
+  if (cfg.demo) {
+    const demo = require('./demo');
+    demo.seedDemo(db);
+    demo.seedPlanningDemo(db);
+    demo.seedJobsDemo(db);
+    demo.seedChecklistDemo(db);
+  }
   ensureAdmin(db, cfg);
   db.run("DELETE FROM sessions WHERE expires_at <= datetime('now')");
 }
@@ -107,10 +122,13 @@ function createApp(cfg) {
   const baseHeaders = { ...SECURITY_HEADERS, ...(cfg.cookieSecure ? { 'Strict-Transport-Security': 'max-age=31536000' } : {}) };
 
   const router = new Router();
-  require('./routes/auth').register(router, { dummyHash, SESSION_COOKIE, firstLoginFile });
+  require('./routes/auth').register(router, { dummyHash, SESSION_COOKIE, firstLoginFile, deviceKey: deviceKey(db) });
   require('./routes/dashboard').register(router);
   require('./routes/clients').register(router);
   require('./routes/followups').register(router);
+  require('./routes/planning').register(router);
+  require('./routes/jobs').register(router);
+  require('./routes/checklists').register(router);
   for (const key of Object.keys(MODULES)) registerCrud(router, key);
   require('./routes/users').register(router);
   require('./routes/search').register(router);
@@ -151,12 +169,15 @@ function createApp(cfg) {
   function loadSession(ctx) {
     const tok = ctx.cookies[SESSION_COOKIE];
     if (!tok) return;
-    const row = db.get(`SELECT s.id AS sid, s.csrf, s.flash, u.id, u.name, u.email, u.role, u.must_change_password
+    const row = db.get(`SELECT s.id AS sid, s.csrf, s.flash, u.id, u.name, u.username, u.email, u.role, u.must_change_password, u.department, u.is_head
                         FROM sessions s JOIN users u ON u.id = s.user_id
                         WHERE s.id = :sid AND s.expires_at > datetime('now') AND u.active = 1`, { sid: A.sha256(tok) });
     if (!row) return;
     ctx.session = { id: row.sid, csrf: row.csrf, flash: row.flash };
-    ctx.user = { id: row.id, name: row.name, email: row.email, role: row.role, must_change_password: row.must_change_password };
+    ctx.user = {
+      id: row.id, name: row.name, username: row.username, email: row.email, role: row.role, must_change_password: row.must_change_password,
+      department: row.department || null, is_head: row.is_head ? 1 : 0,
+    };
   }
 
   function serveStatic(ctx) {
@@ -220,10 +241,19 @@ function createApp(cfg) {
         if (ctx.method === 'GET') return ctx.redirect(`/login?next=${encodeURIComponent(ctx.path + ctx.url.search)}`);
         return ctx.redirect('/login');
       }
+      ctx.files = [];
       if (ctx.method === 'POST') {
         const type = String(req.headers['content-type'] || '');
-        if (!type.startsWith('application/x-www-form-urlencoded')) throw new HttpError(415, 'Forms must be sent as ordinary web forms.');
-        ctx.body = parseForm(await readBody(req));
+        // Routes marked `multipart` also take forms with photos or PDFs (src/uploads.js).
+        if (opts.multipart && type.startsWith('multipart/form-data')) {
+          const { fields, files } = uploads.parseMultipart(await uploads.readRaw(req), type);
+          ctx.body = fields;
+          ctx.files = files;
+        } else if (type.startsWith('application/x-www-form-urlencoded')) {
+          ctx.body = parseForm(await readBody(req));
+        } else {
+          throw new HttpError(415, 'Forms must be sent as ordinary web forms.');
+        }
       }
       if (!opts.public) {
         if (ctx.method === 'POST' && !A.safeEqual(ctx.body._csrf, ctx.session.csrf)) {
